@@ -149,15 +149,56 @@ func (c *groupResourceInstanceRoleAssignmentClient) Read(ctx context.Context, da
 		return GroupResourceInstanceRoleAssignmentModel{}, err
 	}
 
-	httpClient := http.DefaultClient
-
 	apiUrl = strings.TrimSuffix(apiUrl, "/")
 	url := fmt.Sprintf("%s/v2/schema/%s/%s/groups/%s/roles", apiUrl, projectId, envId, data.Group.ValueString())
 
+	// The list is paginated, so check every page before treating the assignment as gone
+	for page := 1; ; page++ {
+		result, err := listGroupRolesPage(ctx, url, token, page)
+		if err != nil {
+			return GroupResourceInstanceRoleAssignmentModel{}, err
+		}
+
+		// Find the matching role assignment
+		for _, item := range result.Data {
+			if item.Key == data.Role.ValueString() &&
+				item.Resource.Key == data.Resource.ValueString() &&
+				item.ResourceInstance.Key == data.ResourceInstance.ValueString() {
+				return data, nil
+			}
+		}
+
+		if page >= result.PageCount {
+			break
+		}
+	}
+
+	return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("group resource instance role assignment not found")
+}
+
+// groupRolesPerPage is the largest page size the group roles endpoint accepts.
+const groupRolesPerPage = 100
+
+type groupRolesPage struct {
+	Data []struct {
+		Key              string `json:"key"`
+		ResourceInstance struct {
+			Key string `json:"key"`
+		} `json:"resource_instance"`
+		Resource struct {
+			Key string `json:"key"`
+		} `json:"resource"`
+	} `json:"data"`
+	PageCount int `json:"page_count"`
+}
+
+func listGroupRolesPage(ctx context.Context, url, token string, page int) (groupRolesPage, error) {
+	httpClient := http.DefaultClient
+
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s?page=%d&per_page=%d", url, page, groupRolesPerPage), nil)
 	if err != nil {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("failed to create request: %w", err)
+		return groupRolesPage{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
@@ -166,53 +207,26 @@ func (c *groupResourceInstanceRoleAssignmentClient) Read(ctx context.Context, da
 	// Execute request
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("failed to execute request: %w", err)
+		return groupRolesPage{}, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("failed to read response body: %w", err)
+		return groupRolesPage{}, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+		return groupRolesPage{}, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Parse response - it's a paginated list
-	var result struct {
-		Data []struct {
-			Key              string `json:"key"`
-			ResourceInstance struct {
-				Key string `json:"key"`
-			} `json:"resource_instance"`
-			Resource struct {
-				Key string `json:"key"`
-			} `json:"resource"`
-		} `json:"data"`
-	}
-
+	var result groupRolesPage
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("failed to parse response: %w", err)
+		return groupRolesPage{}, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Find the matching role assignment
-	found := false
-	for _, item := range result.Data {
-		if item.Key == data.Role.ValueString() &&
-			item.Resource.Key == data.Resource.ValueString() &&
-			item.ResourceInstance.Key == data.ResourceInstance.ValueString() {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return GroupResourceInstanceRoleAssignmentModel{}, fmt.Errorf("group resource instance role assignment not found")
-	}
-
-	return data, nil
+	return result, nil
 }
 
 func (c *groupResourceInstanceRoleAssignmentClient) Delete(ctx context.Context, plan *GroupResourceInstanceRoleAssignmentModel) error {
